@@ -684,69 +684,73 @@ void bind_abstract_state(py::module& m) {
     // (now-removed) AbstractStateManager: loadValue, storeValue, GEP
     // helpers, def/use-site queries, and direct trace access.
     // ---------------------------------------------------------------
-    py::class_<AbstractInterpretation>(m, "AbstractInterpretation")
-        // No constructor / static factory bound here: the class has a
-        // protected ctor and is non-copyable.  Users receive instances via
-        // other bound entry points.
+    // Thin proxy around the AbstractInterpretation singleton.
+    //
+    // AbstractInterpretation has a protected ctor and is non-copyable, which
+    // makes pybind11's type_caster trip a `is_constructible` static_assert
+    // even with a `py::nodelete` holder.  Wrap the singleton in a tiny
+    // copyable proxy and bind THAT — the proxy forwards every call.
+    struct AIProxy {
+        AbstractInterpretation& ai() const { return AbstractInterpretation::getAEInstance(); }
+    };
+
+    py::class_<AIProxy>(m, "AbstractInterpretation")
+        .def(py::init<>())
+        // Singleton accessor (returns a fresh proxy that aliases the singleton).
+        .def_static("getAEInstance", []() { return AIProxy{}; })
 
         // State access (replaces old AbstractStateManager::getAbstractState etc.).
-        .def("getAbsState",
-             py::overload_cast<const ICFGNode*>(&AbstractInterpretation::getAbsState),
-             py::arg("node"), py::return_value_policy::reference)
-        .def("getAbsState",
-             py::overload_cast<const Set<const ValVar*>&, AbstractState&, const ICFGNode*>(&AbstractInterpretation::getAbsState),
-             py::arg("vars"), py::arg("result"), py::arg("node"))
-        .def("getAbsState",
-             py::overload_cast<const Set<const ObjVar*>&, AbstractState&, const ICFGNode*>(&AbstractInterpretation::getAbsState),
-             py::arg("vars"), py::arg("result"), py::arg("node"))
-        .def("getAbsState",
-             py::overload_cast<const Set<const SVFVar*>&, AbstractState&, const ICFGNode*>(&AbstractInterpretation::getAbsState),
-             py::arg("vars"), py::arg("result"), py::arg("node"))
-        .def("updateAbsState", &AbstractInterpretation::updateAbsState,
-             py::arg("node"), py::arg("state"))
+        .def("getAbsState", [](const AIProxy& self, const ICFGNode* node) -> AbstractState& {
+            return self.ai().getAbsState(node);
+        }, py::arg("node"), py::return_value_policy::reference)
+        .def("getAbsState", [](const AIProxy& self, const Set<const ValVar*>& vars, AbstractState& result, const ICFGNode* node) {
+            self.ai().getAbsState(vars, result, node);
+        }, py::arg("vars"), py::arg("result"), py::arg("node"))
+        .def("getAbsState", [](const AIProxy& self, const Set<const ObjVar*>& vars, AbstractState& result, const ICFGNode* node) {
+            self.ai().getAbsState(vars, result, node);
+        }, py::arg("vars"), py::arg("result"), py::arg("node"))
+        .def("getAbsState", [](const AIProxy& self, const Set<const SVFVar*>& vars, AbstractState& result, const ICFGNode* node) {
+            self.ai().getAbsState(vars, result, node);
+        }, py::arg("vars"), py::arg("result"), py::arg("node"))
+        .def("updateAbsState", [](AIProxy& self, const ICFGNode* node, const AbstractState& state) {
+            self.ai().updateAbsState(node, state);
+        }, py::arg("node"), py::arg("state"))
 
         // GEP helpers.
-        .def("getGepElementIndex", &AbstractInterpretation::getGepElementIndex, py::arg("gep"))
-        .def("getGepByteOffset", &AbstractInterpretation::getGepByteOffset, py::arg("gep"))
-        .def("getGepObjAddrs", &AbstractInterpretation::getGepObjAddrs,
-             py::arg("pointer"), py::arg("offset"))
+        .def("getGepElementIndex", [](AIProxy& self, const GepStmt* gep) { return self.ai().getGepElementIndex(gep); }, py::arg("gep"))
+        .def("getGepByteOffset",   [](AIProxy& self, const GepStmt* gep) { return self.ai().getGepByteOffset(gep);   }, py::arg("gep"))
+        .def("getGepObjAddrs",     [](AIProxy& self, const ValVar* pointer, IntervalValue offset) { return self.ai().getGepObjAddrs(pointer, offset); }, py::arg("pointer"), py::arg("offset"))
 
         // Load / store through pointer.
-        .def("loadValue", &AbstractInterpretation::loadValue,
-             py::arg("pointer"), py::arg("node"))
-        .def("storeValue", &AbstractInterpretation::storeValue,
-             py::arg("pointer"), py::arg("val"), py::arg("node"))
+        .def("loadValue",  [](AIProxy& self, const ValVar* pointer, const ICFGNode* node) { return self.ai().loadValue(pointer, node); }, py::arg("pointer"), py::arg("node"))
+        .def("storeValue", [](AIProxy& self, const ValVar* pointer, const AbstractValue& val, const ICFGNode* node) { self.ai().storeValue(pointer, val, node); }, py::arg("pointer"), py::arg("val"), py::arg("node"))
 
         // Type / size helpers.
-        .def("getPointeeElement", &AbstractInterpretation::getPointeeElement,
-             py::arg("var"), py::arg("node"), py::return_value_policy::reference)
-        .def("getAllocaInstByteSize", &AbstractInterpretation::getAllocaInstByteSize, py::arg("addr"))
+        .def("getPointeeElement",     [](AIProxy& self, const ObjVar* var, const ICFGNode* node) { return self.ai().getPointeeElement(var, node); }, py::arg("var"), py::arg("node"), py::return_value_policy::reference)
+        .def("getAllocaInstByteSize", [](AIProxy& self, const AddrStmt* addr) { return self.ai().getAllocaInstByteSize(addr); }, py::arg("addr"))
 
         // Direct trace access.
-        .def("getTrace", &AbstractInterpretation::getTrace, py::return_value_policy::reference)
-        .def("__getitem__", [](AbstractInterpretation& self, const ICFGNode* node) -> AbstractState& {
-            return self[node];
+        .def("getTrace", [](AIProxy& self) -> Map<const ICFGNode*, AbstractState>& { return self.ai().getTrace(); }, py::return_value_policy::reference)
+        .def("__getitem__", [](AIProxy& self, const ICFGNode* node) -> AbstractState& {
+            return self.ai()[node];
         }, py::arg("node"), py::return_value_policy::reference)
-        .def("__setitem__", [](AbstractInterpretation& self, const ICFGNode* node, const AbstractState& state) {
-            self.updateAbsState(node, state);
+        .def("__setitem__", [](AIProxy& self, const ICFGNode* node, const AbstractState& state) {
+            self.ai().updateAbsState(node, state);
         }, py::arg("node"), py::arg("state"))
-        .def("__contains__", [](AbstractInterpretation& self, const ICFGNode* node) {
-            return self.getTrace().count(node) > 0;
+        .def("__contains__", [](AIProxy& self, const ICFGNode* node) {
+            return self.ai().getTrace().count(node) > 0;
         }, py::arg("node"))
 
         // Def/Use site queries.
-        .def("getUseSitesOfObjVar", &AbstractInterpretation::getUseSitesOfObjVar,
-             py::arg("obj"), py::arg("node"))
-        .def("getUseSitesOfValVar", &AbstractInterpretation::getUseSitesOfValVar, py::arg("var"))
-        .def("getDefSiteOfValVar", &AbstractInterpretation::getDefSiteOfValVar,
-             py::arg("var"), py::return_value_policy::reference)
-        .def("getDefSiteOfObjVar", &AbstractInterpretation::getDefSiteOfObjVar,
-             py::arg("obj"), py::arg("node"), py::return_value_policy::reference)
+        .def("getUseSitesOfObjVar", [](const AIProxy& self, const ObjVar* obj, const ICFGNode* node) { return self.ai().getUseSitesOfObjVar(obj, node); }, py::arg("obj"), py::arg("node"))
+        .def("getUseSitesOfValVar", [](const AIProxy& self, const ValVar* var) { return self.ai().getUseSitesOfValVar(var); }, py::arg("var"))
+        .def("getDefSiteOfValVar",  [](const AIProxy& self, const ValVar* var) { return self.ai().getDefSiteOfValVar(var); }, py::arg("var"), py::return_value_policy::reference)
+        .def("getDefSiteOfObjVar",  [](const AIProxy& self, const ObjVar* obj, const ICFGNode* node) { return self.ai().getDefSiteOfObjVar(obj, node); }, py::arg("obj"), py::arg("node"), py::return_value_policy::reference)
 
         // Top-level driver methods.
-        .def("analyse", &AbstractInterpretation::analyse)
-        .def("analyzeFromAllProgEntries", &AbstractInterpretation::analyzeFromAllProgEntries)
-        .def("runOnModule", &AbstractInterpretation::runOnModule);
+        .def("analyse", [](AIProxy& self) { self.ai().analyse(); })
+        .def("analyzeFromAllProgEntries", [](AIProxy& self) { self.ai().analyzeFromAllProgEntries(); })
+        .def("runOnModule", [](AIProxy& self) { self.ai().runOnModule(); });
 
     // Expose the few Options statics that downstream Python code relies on.
     py::class_<Options>(m, "Options")
