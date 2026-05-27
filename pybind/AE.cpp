@@ -8,11 +8,17 @@
 #include "MemoryModel/PointerAnalysis.h"
 #include "WPA/Andersen.h"
 #include "AE/Core/AbstractState.h"
+#include "AE/Svfexe/AbsExtAPI.h"
+#include "AE/Svfexe/AbstractInterpretation.h"
 #include <pybind11/operators.h>
 
 
 namespace py = pybind11;
 using namespace SVF;
+
+struct PyAbstractInterpretation {
+    AbstractInterpretation* ae;
+};
 
 void bind_abstract_state(py::module& m) {
 
@@ -314,12 +320,7 @@ void bind_abstract_state(py::module& m) {
         .def("load", [](AbstractState& self, u32_t addr) -> AbstractValue& {
             return self.load(addr);
         }, py::arg("addr"), py::return_value_policy::reference)
-
-        .def("storeValue", &AbstractState::storeValue,
-             py::arg("varId"), py::arg("val"))
-
-        .def("loadValue", &AbstractState::loadValue,
-            py::arg("varId"), py::return_value_policy::reference)
+        .def("initObjVar", &AbstractState::initObjVar, py::arg("obj_var"))
 
         // Equality comparison
         .def("equals", &AbstractState::equals,
@@ -340,13 +341,12 @@ void bind_abstract_state(py::module& m) {
         .def("narrowing", &AbstractState::narrowing, py::arg("other"))
         .def("getIDFromAddr", &AbstractState::getIDFromAddr, py::arg("addr"))
 
-        .def("getAllocaInstByteSize", &AbstractState::getAllocaInstByteSize, py::arg("addr"))
-
         // Static utilities for address handling
         .def_static("isVirtualMemAddress", &AbstractState::isVirtualMemAddress, py::arg("val"))
         .def_static("getVirtualMemAddress", &AbstractState::getVirtualMemAddress, py::arg("idx"))
         .def_static("isNullMem", &AbstractState::isNullMem, py::arg("addr"))
         .def_static("isBlackHoleObjAddr", &AbstractState::isBlackHoleObjAddr, py::arg("addr"))
+        .def("isFreedMem", &AbstractState::isFreedMem, py::arg("addr"))
 
         // State management
         .def("clear", &AbstractState::clear)
@@ -385,15 +385,8 @@ void bind_abstract_state(py::module& m) {
          }, py::return_value_policy::move)
         .def("bottom", &AbstractState::bottom)
         .def("top", &AbstractState::top)
-        .def("getGepObjAddrs", &AbstractState::getGepObjAddrs, py::arg("ptr"), py::arg("offset"))
-        .def("getElementIndex", &AbstractState::getElementIndex, py::arg("gep"))
-        .def("getByteOffset", &AbstractState::getByteOffset, py::arg("gep"))
-        .def("loadValue", &AbstractState::loadValue, py::arg("var_id"))
-        .def("storeValue", &AbstractState::storeValue, py::arg("var_id"), py::arg("val"))
-        .def("getPointeeElement", &AbstractState::getPointeeElement, py::arg("var_id"), py::return_value_policy::reference)
         .def("inVarToValTable", &AbstractState::inVarToValTable, py::arg("var_id"))
         .def("inVarToAddrsTable", &AbstractState::inVarToAddrsTable, py::arg("var_id"))
-        .def("getGepObjAddrs", &AbstractState::getGepObjAddrs, py::arg("var_id"), py::arg("offset"))
         .def_static("isCmpBranchFeasible", [](SVFIR* svfir, const CmpStmt* cmpStmt, s64_t succ, AbstractState& as) {
             Map<s32_t, s32_t> _reverse_predicate = {
                 {CmpStmt::Predicate::FCMP_OEQ, CmpStmt::Predicate::FCMP_ONE}, // == -> !=
@@ -686,5 +679,101 @@ void bind_abstract_state(py::module& m) {
             as = new_es;
             return true;
         }, py::arg("svfir"), py::arg("var"), py::arg("succ"), py::arg("as"));
-}
 
+    m.attr("NullMemAddr") = py::int_(NullMemAddr);
+    m.attr("BlackHoleObjAddr") = py::int_(BlackHoleObjAddr);
+
+    py::class_<PyAbstractInterpretation>(m, "AbstractInterpretation")
+        .def_static("getAEInstance", []() {
+            return PyAbstractInterpretation{&AbstractInterpretation::getAEInstance()};
+        })
+        .def("getAbsState", [](PyAbstractInterpretation& self, const ICFGNode* node) -> AbstractState& {
+            return self.ae->getAbsState(node);
+        }, py::arg("node"), py::return_value_policy::reference)
+        .def("updateAbsState", [](PyAbstractInterpretation& self, const ICFGNode* node,
+                                  const AbstractState& state) {
+            self.ae->updateAbsState(node, state);
+        }, py::arg("node"), py::arg("state"))
+        .def("hasAbsState", [](PyAbstractInterpretation& self, const ICFGNode* node) {
+            return self.ae->hasAbsState(node);
+        }, py::arg("node"))
+        .def("joinStates", [](PyAbstractInterpretation& self, AbstractState& dst,
+                              const AbstractState& src) {
+            self.ae->joinStates(dst, src);
+        }, py::arg("dst"), py::arg("src"))
+        .def("getAbsValue", [](PyAbstractInterpretation& self, const SVFVar* var,
+                               const ICFGNode* node) -> const AbstractValue& {
+            return self.ae->getAbsValue(var, node);
+        }, py::arg("var"), py::arg("node"), py::return_value_policy::reference)
+        .def("hasAbsValue", [](PyAbstractInterpretation& self, const SVFVar* var,
+                               const ICFGNode* node) {
+            return self.ae->hasAbsValue(var, node);
+        }, py::arg("var"), py::arg("node"))
+        .def("updateAbsValue", [](PyAbstractInterpretation& self, const SVFVar* var,
+                                  const AbstractValue& val, const ICFGNode* node) {
+            self.ae->updateAbsValue(var, val, node);
+        }, py::arg("var"), py::arg("val"), py::arg("node"))
+        .def("updateAbsValue", [](PyAbstractInterpretation& self, const SVFVar* var,
+                                  const IntervalValue& val, const ICFGNode* node) {
+            self.ae->updateAbsValue(var, AbstractValue(val), node);
+        }, py::arg("var"), py::arg("val"), py::arg("node"))
+        .def("updateAbsValue", [](PyAbstractInterpretation& self, const SVFVar* var,
+                                  const AddressValue& val, const ICFGNode* node) {
+            self.ae->updateAbsValue(var, AbstractValue(val), node);
+        }, py::arg("var"), py::arg("val"), py::arg("node"))
+        .def("getGepByteOffset", [](PyAbstractInterpretation& self, const GepStmt* gep) {
+            return self.ae->getGepByteOffset(gep);
+        }, py::arg("gep"))
+        .def("getGepObjAddrs", [](PyAbstractInterpretation& self, const SVFVar* pointer,
+                                  IntervalValue offset) {
+            const ValVar* val = SVFUtil::dyn_cast<ValVar>(pointer);
+            if (val == nullptr)
+                throw py::type_error("getGepObjAddrs expects a ValVar pointer");
+            return self.ae->getGepObjAddrs(val, offset);
+        }, py::arg("pointer"), py::arg("offset"))
+        .def("loadValue", [](PyAbstractInterpretation& self, const SVFVar* pointer,
+                             const ICFGNode* node) -> AbstractValue {
+            const ValVar* val = SVFUtil::dyn_cast<ValVar>(pointer);
+            if (val == nullptr)
+                throw py::type_error("loadValue expects a ValVar pointer");
+            return self.ae->loadValue(val, node);
+        }, py::arg("pointer"), py::arg("node"))
+        .def("storeValue", [](PyAbstractInterpretation& self, const SVFVar* pointer,
+                              const AbstractValue& val, const ICFGNode* node) {
+            const ValVar* ptr = SVFUtil::dyn_cast<ValVar>(pointer);
+            if (ptr == nullptr)
+                throw py::type_error("storeValue expects a ValVar pointer");
+            self.ae->storeValue(ptr, val, node);
+        }, py::arg("pointer"), py::arg("val"), py::arg("node"))
+        .def("getAllocaInstByteSize", [](PyAbstractInterpretation& self, const AddrStmt* addr) {
+            return self.ae->getAllocaInstByteSize(addr);
+        }, py::arg("addr"))
+        .def("__getitem__", [](PyAbstractInterpretation& self, const ICFGNode* node) -> AbstractState& {
+            return (*self.ae)[node];
+        }, py::arg("node"), py::return_value_policy::reference)
+        .def("__setitem__", [](PyAbstractInterpretation& self, const ICFGNode* node,
+                               const AbstractState& state) {
+            self.ae->updateAbsState(node, state);
+        }, py::arg("node"), py::arg("state"))
+        .def("__contains__", [](PyAbstractInterpretation& self, const ICFGNode* node) {
+            return self.ae->hasAbsState(node);
+        }, py::arg("node"));
+
+    py::class_<AbsExtAPI>(m, "AbsExtAPI")
+        .def(py::init([](PyAbstractInterpretation& handle) {
+            return new AbsExtAPI(handle.ae);
+        }), py::arg("ae"))
+        .def("handleExtAPI", &AbsExtAPI::handleExtAPI, py::arg("call"))
+        .def("getElementSize", &AbsExtAPI::getElementSize, py::arg("var"))
+        .def_static("isValidLength", &AbsExtAPI::isValidLength, py::arg("len"))
+        .def("getStrlen", &AbsExtAPI::getStrlen, py::arg("str_value"), py::arg("node"))
+        .def("handleMemcpy", &AbsExtAPI::handleMemcpy,
+             py::arg("dst"), py::arg("src"), py::arg("len"),
+             py::arg("start_idx"), py::arg("node"))
+        .def("handleMemset", &AbsExtAPI::handleMemset,
+             py::arg("dst"), py::arg("elem"), py::arg("len"), py::arg("node"))
+        .def("getRangeLimitFromType", &AbsExtAPI::getRangeLimitFromType,
+             py::arg("type"))
+        .def("getAbsState", &AbsExtAPI::getAbsState,
+             py::arg("node"), py::return_value_policy::reference);
+}

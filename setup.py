@@ -98,9 +98,13 @@ class CMakeBuild(build_ext):
         # if the platform is linux, we need to change the rpath of libz3.so and libLLVM.so
         #e.g. patchelf --add-needed '$ORIGIN/SVF/z3.obj/bin/libz3.so' pysvf.cpython-310-aarch64-linux-gnu.so (pay attention to python vers)
         if platform.system() == "Linux":
-            subprocess.run(["patchelf", "--add-needed", "$ORIGIN/SVF/z3.obj/bin/libz3.so", so_target], check=True)
-            if os.path.exists(os.path.join(os.environ["LLVM_DIR"], "lib", "libLLVM.so")):
-                subprocess.run(["patchelf", "--add-needed", "$ORIGIN/SVF/llvm-16.0.0.obj/lib/libLLVM.so", so_target], check=True)
+            patchelf = shutil.which("patchelf")
+            if patchelf:
+                subprocess.run([patchelf, "--add-needed", "$ORIGIN/SVF/z3.obj/bin/libz3.so", so_target], check=True)
+                if os.path.exists(os.path.join(os.environ["LLVM_DIR"], "lib", "libLLVM.so")):
+                    subprocess.run([patchelf, "--add-needed", "$ORIGIN/SVF/llvm-16.0.0.obj/lib/libLLVM.so", so_target], check=True)
+            else:
+                print("patchelf not found; skipping ELF dependency patching. Set LD_LIBRARY_PATH when using this local build.")
         
 
 
@@ -159,4 +163,3 @@ setup(
     include_package_data=True,
     zip_safe=False,
 )
-

@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include "Util/Options.h"
 #include <pybind11/stl.h>
+#include "SVF-LLVM/LLVMModule.h"
 #include "SVF-LLVM/SVFIRBuilder.h"
 #include "Graphs/ICFG.h"
 #include "SVFIR/SVFType.h"
@@ -8,11 +9,88 @@
 #include "MemoryModel/PointerAnalysis.h"
 #include "WPA/Andersen.h"
 #include "AE/Core/AbstractState.h"
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <pybind11/operators.h>
 
 
 namespace py = pybind11;
 using namespace SVF;
+
+namespace {
+
+void appendConstantInitializerBytes(const llvm::Constant* constant,
+                                    std::vector<int64_t>& bytes)
+{
+    if (constant == nullptr)
+        return;
+
+    if (const auto* dataArray = llvm::dyn_cast<llvm::ConstantDataArray>(constant))
+    {
+        if (dataArray->isString())
+        {
+            llvm::StringRef data = dataArray->getAsString();
+            for (unsigned char ch : data)
+                bytes.push_back(ch);
+            return;
+        }
+        if (dataArray->getElementType()->isIntegerTy(8))
+        {
+            for (unsigned i = 0; i < dataArray->getNumElements(); ++i)
+                bytes.push_back(static_cast<int64_t>(dataArray->getElementAsInteger(i) & 0xff));
+            return;
+        }
+    }
+
+    if (const auto* zero = llvm::dyn_cast<llvm::ConstantAggregateZero>(constant))
+    {
+        if (const auto* arrayTy = llvm::dyn_cast<llvm::ArrayType>(zero->getType()))
+        {
+            if (arrayTy->getElementType()->isIntegerTy(8))
+            {
+                bytes.insert(bytes.end(), arrayTy->getNumElements(), 0);
+                return;
+            }
+        }
+    }
+
+    if (const auto* array = llvm::dyn_cast<llvm::ConstantArray>(constant))
+    {
+        for (const llvm::Use& operand : array->operands())
+        {
+            if (const auto* nested = llvm::dyn_cast<llvm::Constant>(operand.get()))
+                appendConstantInitializerBytes(nested, bytes);
+        }
+        return;
+    }
+
+    if (const auto* intValue = llvm::dyn_cast<llvm::ConstantInt>(constant))
+    {
+        if (intValue->getBitWidth() <= 8)
+            bytes.push_back(static_cast<int64_t>(intValue->getZExtValue() & 0xff));
+    }
+}
+
+std::vector<int64_t> getConstantInitializerBytes(const BaseObjVar* obj)
+{
+    std::vector<int64_t> bytes;
+    if (obj == nullptr)
+        return bytes;
+
+    LLVMModuleSet* modules = LLVMModuleSet::getLLVMModuleSet();
+    if (modules == nullptr || !modules->hasLLVMValue(obj))
+        return bytes;
+
+    const llvm::Value* value = modules->getLLVMValue(obj);
+    const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(value);
+    if (global == nullptr || !global->hasInitializer())
+        return bytes;
+
+    appendConstantInitializerBytes(global->getInitializer(), bytes);
+    return bytes;
+}
+
+} // namespace
 
 void bind_svf_stmt(py::module& m) {
     py::class_<SVFStmt>(m, "SVFStmt")
@@ -120,8 +198,20 @@ void bind_svf_stmt(py::module& m) {
 
     py::class_<LoadStmt, AssignStmt>(m, "LoadStmt");
 
-    py::class_<CallPE, AssignStmt>(m, "CallPE")
-            .def("getCallSite", &CallPE::getCallSite, "Get the call site")
+    py::class_<CallPE, SVFStmt>(m, "CallPE")
+            .def("getOpVar", [](CallPE& stmt, int ID) { return stmt.getOpVar(ID); },
+                 py::return_value_policy::reference)
+            .def("getOpVarId", &CallPE::getOpVarID)
+            .def("getOpndVars", &CallPE::getOpndVars, py::return_value_policy::reference)
+            .def("getResId", &CallPE::getResID)
+            .def("getRes", &CallPE::getRes, py::return_value_policy::reference)
+            .def("getOpVarNum", &CallPE::getOpVarNum, "Get the number of operands of the statement")
+            .def("getOpCallICFGNode", &CallPE::getOpCallICFGNode,
+                 py::arg("idx"), py::return_value_policy::reference,
+                 "Get the call ICFG node for the operand")
+            .def("getOpCallICFGNodes", &CallPE::getOpCallICFGNodes,
+                 py::return_value_policy::reference,
+                 "Get all operand call ICFG nodes")
             .def("getFunEntryICFGNode", &CallPE::getFunEntryICFGNode, py::return_value_policy::reference,
                  "Get the function entry ICFG node");
 
@@ -615,6 +705,7 @@ void bind_svf_var(py::module &m) {
             .def("isConstantArray", &SVF::BaseObjVar::isConstantArray)
             .def("isConstDataOrConstGlobal", &SVF::BaseObjVar::isConstDataOrConstGlobal)
             .def("isConstDataOrAggData", &SVF::BaseObjVar::isConstDataOrAggData)
+            .def("getConstantInitializerBytes", &getConstantInitializerBytes)
             .def("getFunction", &SVF::BaseObjVar::getFunction, py::return_value_policy::reference)
             .def("getBaseMemObj", &SVF::BaseObjVar::getBaseMemObj, py::return_value_policy::reference)
             .def("isBaseObjVar", [](SVF::ObjVar* node) -> bool {
