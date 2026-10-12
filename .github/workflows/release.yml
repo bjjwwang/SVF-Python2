@@ -47,6 +47,14 @@ jobs:
           export PYBIND11_DIR=$(python -m pybind11 --cmakedir)
           python setup.py bdist_wheel --plat-name "${{ matrix.wheel-platform || 'manylinux2014' }}_$(uname -m)"
 
+      - name: Inspect and repair release wheel
+        run: |
+          auditwheel show dist/*.whl
+          auditwheel repair --strip -w wheelhouse dist/*.whl
+          rm dist/*.whl
+          mv wheelhouse/*.whl dist/
+          auditwheel show dist/*.whl
+
       - name: Check wheel size and contents
         run: |
           python - <<'PY'
@@ -55,9 +63,10 @@ jobs:
           from pathlib import Path
           from zipfile import ZipFile
 
-          wheels = list(Path('dist').glob('*cp314-cp314-linux_x86_64.whl'))
+          wheels = list(Path('dist').glob('*cp314-cp314-*x86_64.whl'))
           assert len(wheels) == 1, wheels
           wheel = wheels[0]
+          assert '-manylinux_' in wheel.name, wheel.name
           size = wheel.stat().st_size
           with ZipFile(wheel) as archive:
               llvm_files = [name for name in archive.namelist() if Path(name).name.startswith('libLLVM.')]
