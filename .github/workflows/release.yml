@@ -60,16 +60,25 @@ jobs:
           python - <<'PY'
           import json
           import platform
+          import re
           from pathlib import Path
           from zipfile import ZipFile
+          from packaging.utils import parse_wheel_filename
 
           wheels = list(Path('dist').glob('*cp314-cp314-*x86_64.whl'))
           assert len(wheels) == 1, wheels
           wheel = wheels[0]
           assert '-manylinux_' in wheel.name, wheel.name
+          tags = parse_wheel_filename(wheel.name)[3]
+          assert all(re.fullmatch(r'manylinux_\d+_\d+_x86_64', tag.platform) for tag in tags), tags
           size = wheel.stat().st_size
           with ZipFile(wheel) as archive:
               llvm_files = [name for name in archive.namelist() if Path(name).name.startswith('libLLVM.')]
+              metadata_path = next(name for name in archive.namelist() if name.endswith('.dist-info/WHEEL'))
+              metadata = archive.read(metadata_path).decode()
+              assert 'linux_x86_64' not in metadata, metadata
+              assert all('Tag: ' + str(tag) in metadata for tag in tags), metadata
+              print('WHEEL_METADATA=' + metadata)
           result = dict(platform=platform.system(), arch=platform.machine(),
                         python=platform.python_version(), wheel=wheel.name,
                         bytes=size, mib=size / 1024**2, limit_bytes=100 * 1024**2,
@@ -104,6 +113,13 @@ jobs:
           pysvf.releasePAG()
           PY
 
+      - name: Save repaired wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: repaired-python314-wheel
+          path: dist/*.whl
+          retention-days: 1
+
       - name: Save size measurements
         if: always()
         uses: actions/upload-artifact@v4
@@ -111,3 +127,35 @@ jobs:
           name: wheel-size-ubuntu2604-py314
           path: wheel-size.json
           if-no-files-found: ignore
+
+  compatible-runtime:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          name: repaired-python314-wheel
+          path: dist
+      - name: Test repaired wheel on Ubuntu 24.04
+        working-directory: ${{ runner.temp }}
+        env:
+          WHEEL_DIR: ${{ github.workspace }}/dist
+          BITCODE_PATH: ${{ github.workspace }}/test_cases/BASIC_array_2d_0-0.c.bc
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-test"
+          "$RUNNER_TEMP/wheel-test/bin/python" -m pip install "$WHEEL_DIR"/*.whl
+          "$RUNNER_TEMP/wheel-test/bin/python" -I - <<'PY'
+          import os
+          import pysvf
+
+          print('Installed package:', pysvf.__file__)
+          svfir = pysvf.get_svfir(os.environ['BITCODE_PATH'])
+          nodes = svfir.getICFG().getNodes()
+          assert nodes
+          print('ICFG nodes:', len(nodes))
+          pysvf.releasePAG()
+          PY
