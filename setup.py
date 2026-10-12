@@ -125,6 +125,12 @@ class CMakeBuild(build_ext):
         shutil.copytree(os.path.join(SVF_SRC_DIR, "lib"), os.path.join(self.build_lib, "pysvf", "SVF", "Release-build", "lib"),dirs_exist_ok=True)
         shutil.copytree(os.path.join(SVF_SRC_DIR, "bin"), os.path.join(self.build_lib, "pysvf", "SVF", "Release-build", "bin"),dirs_exist_ok=True)
 
+        # Both the libraries and tools must find dependencies inside the wheel.
+        if platform.system() == "Linux":
+            svf_build = os.path.join(self.build_lib, "pysvf", "SVF", "Release-build")
+            for binary in glob.glob(os.path.join(svf_build, "lib", "*.so*")) + glob.glob(os.path.join(svf_build, "bin", "*")):
+                subprocess.run(["patchelf", "--set-rpath", "$ORIGIN/../lib:$ORIGIN/../../z3.obj/bin:$ORIGIN/../../z3.obj/lib", binary], check=True)
+
         # cp -rf $GITHUB_WORKSPACE/z3/bin .build_lib/pysvf/z3/bin
         # if exist bin or lib
         if os.path.exists(os.path.join(os.environ["Z3_DIR"], "bin")):

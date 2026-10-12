@@ -15,6 +15,9 @@ jobs:
           - os: ubuntu-26.04
             python-version: '3.14'
             wheel-platform: linux
+          - os: ubuntu-24.04
+            python-version: '3.9'
+            wheel-platform: linux
     env:
       VERSION: 1.0.0.dev0
       CMAKE_BUILD_TYPE: Release
@@ -48,8 +51,8 @@ jobs:
           python setup.py bdist_wheel --plat-name "${{ matrix.wheel-platform || 'manylinux2014' }}_$(uname -m)"
 
       - name: Inspect and repair release wheel
+        if: matrix.os == 'ubuntu-26.04'
         run: |
-          auditwheel show dist/*.whl
           auditwheel repair --strip -w wheelhouse dist/*.whl
           rm dist/*.whl
           mv wheelhouse/*.whl dist/
@@ -65,18 +68,20 @@ jobs:
           from zipfile import ZipFile
           from packaging.utils import parse_wheel_filename
 
-          wheels = list(Path('dist').glob('*cp314-cp314-*x86_64.whl'))
+          wheels = list(Path('dist').glob('*.whl'))
           assert len(wheels) == 1, wheels
           wheel = wheels[0]
-          assert '-manylinux_' in wheel.name, wheel.name
           tags = parse_wheel_filename(wheel.name)[3]
-          assert all(re.fullmatch(r'manylinux_\d+_\d+_x86_64', tag.platform) for tag in tags), tags
+          repaired = platform.python_version_tuple()[:2] == ('3', '14')
+          if repaired:
+              assert all(re.fullmatch(r'manylinux_\d+_\d+_x86_64', tag.platform) for tag in tags), tags
           size = wheel.stat().st_size
           with ZipFile(wheel) as archive:
               llvm_files = [name for name in archive.namelist() if Path(name).name.startswith('libLLVM.')]
               metadata_path = next(name for name in archive.namelist() if name.endswith('.dist-info/WHEEL'))
               metadata = archive.read(metadata_path).decode()
-              assert 'linux_x86_64' not in metadata, metadata
+              if repaired:
+                  assert 'linux_x86_64' not in metadata, metadata
               assert all('Tag: ' + str(tag) in metadata for tag in tags), metadata
               print('WHEEL_METADATA=' + metadata)
           result = dict(platform=platform.system(), arch=platform.machine(),
@@ -94,6 +99,7 @@ jobs:
         env:
           WHEEL_DIR: ${{ github.workspace }}/dist
           BITCODE_PATH: ${{ github.workspace }}/test_cases/BASIC_array_2d_0-0.c.bc
+          EXPECTED_PYTHON: ${{ matrix.python-version }}
         run: |
           python -m venv "$RUNNER_TEMP/wheel-test"
           "$RUNNER_TEMP/wheel-test/bin/python" -m pip install "$WHEEL_DIR"/*.whl
@@ -102,7 +108,7 @@ jobs:
           import sys
           import pysvf
 
-          assert sys.version_info[:2] == (3, 14)
+          assert sys.version_info[:2] == tuple(map(int, os.environ['EXPECTED_PYTHON'].split('.')))
           print('Python:', sys.version)
           print('Installed package:', pysvf.__file__)
           svfir = pysvf.get_svfir(os.environ['BITCODE_PATH'])
@@ -111,9 +117,14 @@ jobs:
           assert nodes
           print('ICFG nodes:', len(nodes))
           pysvf.releasePAG()
+          os.environ.pop('LD_LIBRARY_PATH', None)
+          output, _ = pysvf.run_svf_tool('wpa', ['-ander', os.environ['BITCODE_PATH']])
+          assert 'TotalPointers' in output
+          print('WPA smoke test: passed without LD_LIBRARY_PATH')
           PY
 
       - name: Save repaired wheel
+        if: matrix.os == 'ubuntu-26.04'
         uses: actions/upload-artifact@v4
         with:
           name: repaired-python314-wheel
@@ -124,7 +135,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-size-ubuntu2604-py314
+          name: wheel-size-${{ matrix.os }}-py${{ matrix.python-version }}
           path: wheel-size.json
           if-no-files-found: ignore
 
@@ -158,4 +169,8 @@ jobs:
           assert nodes
           print('ICFG nodes:', len(nodes))
           pysvf.releasePAG()
+          os.environ.pop('LD_LIBRARY_PATH', None)
+          output, _ = pysvf.run_svf_tool('wpa', ['-ander', os.environ['BITCODE_PATH']])
+          assert 'TotalPointers' in output
+          print('WPA smoke test: passed without LD_LIBRARY_PATH')
           PY
